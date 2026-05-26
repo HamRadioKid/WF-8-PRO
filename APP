@@ -1,0 +1,124 @@
+import numpy as np
+import sounddevice as sd
+import tkinter as tk
+from tkinter import scrolledtext
+import threading
+import time
+
+SAMPLE_RATE = 44100
+START_FREQ = 1000
+STEP_FREQ = 15
+TONE_DURATION = 0.15
+CHUNK_SIZE = int(SAMPLE_RATE * 0.08)
+
+class WF8App:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("WF-8 Digital Mode Terminal (KF8FQN)")
+        self.root.geometry("500x500")
+        
+        self.rx_label = tk.Label(root, text="Received Text:")
+        self.rx_label.pack(pady=5)
+        
+        self.rx_box = scrolledtext.ScrolledText(root, height=10, width=55)
+        self.rx_box.pack(pady=5)
+        
+        self.tx_label = tk.Label(root, text="Type Message to Transmit:")
+        self.tx_label.pack(pady=5)
+        
+        self.tx_entry = tk.Entry(root, width=55)
+        self.tx_entry.pack(pady=5)
+        self.tx_entry.insert(0, "CQ CQ DE KF8FQN")
+        
+        self.tx_button = tk.Button(root, text="TRANSMIT SIGNALS", 
+command=self.start_tx_thread, bg="red", fg="black")
+        self.tx_button.pack(pady=15)
+        
+        self.last_char = ""
+        self.duplicate_protection = 0
+        self.is_listening = True
+        
+        self.start_rx_thread()
+
+    def append_rx_text(self, text):
+        self.rx_box.insert(tk.END, text)
+        self.rx_box.see(tk.END)
+
+    def start_tx_thread(self):
+        message = self.tx_entry.get()
+        tx_thread = threading.Thread(target=self.transmit_message, 
+args=(message,))
+        tx_thread.daemon = True
+        tx_thread.start()
+
+    def transmit_message(self, message):
+        self.is_listening = False
+        message = message.upper()
+        
+        full_signal = []
+        current_phase = 0.0
+        preamble = [1200, 1400, 1600, 1800]
+        all_frequencies = preamble + [START_FREQ + (ord(char) * STEP_FREQ) 
+for char in message]
+        
+        for freq in all_frequencies:
+            num_samples = int(SAMPLE_RATE * TONE_DURATION)
+            t = np.arange(num_samples) / SAMPLE_RATE
+            phase = 2 * np.pi * freq * t + current_phase
+            wave = 0.4 * np.sin(phase)
+            full_signal.extend(wave)
+            current_phase = phase[-1] % (2 * np.pi)
+            
+        sd.play(np.array(full_signal, dtype=np.float32), SAMPLE_RATE)
+        sd.wait()
+        
+        self.is_listening = True
+
+    def start_rx_thread(self):
+        rx_thread = threading.Thread(target=self.listen_loop)
+        rx_thread.daemon = True
+        rx_thread.start()
+
+    def listen_loop(self):
+        def audio_callback(indata, frames, time_info, status):
+            if not self.is_listening:
+                return
+                
+            audio_signal = indata[:, 0]
+            volume = np.max(np.abs(audio_signal))
+            
+            if volume < 0.03:
+                return
+
+            fft_data = np.abs(np.fft.rfft(audio_signal))
+            frequencies = np.fft.rfftfreq(len(audio_signal), 1.0 / 
+SAMPLE_RATE)
+            loudest_freq = frequencies[np.argmax(fft_data)]
+            
+            if 800 < loudest_freq < 3000:
+                char_code = round((loudest_freq - START_FREQ) / STEP_FREQ)
+                try:
+                    character = chr(char_code)
+                    if character.isprintable() and len(character) == 1:
+                        if character != self.last_char:
+                            self.append_rx_text(character)
+                            self.last_char = character
+                            self.duplicate_protection = 0
+                        else:
+                            self.duplicate_protection += 1
+                            if self.duplicate_protection > 4:
+                                self.append_rx_text(character)
+                                self.duplicate_protection = 0
+                except:
+                    pass
+
+        with sd.InputStream(channels=1, callback=audio_callback, 
+blocksize=CHUNK_SIZE, samplerate=SAMPLE_RATE):
+            while True:
+                time.sleep(1)
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = WF8App(root)
+    root.mainloop()
+
